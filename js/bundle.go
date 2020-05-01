@@ -223,7 +223,7 @@ func (b *Bundle) Instantiate() (bi *BundleInstance, instErr error) {
 		panic("exported default is not a function")
 	}
 
-	jsOptions := rt.Get("options")
+	jsOptions := exports.Get("options")
 	var jsOptionsObj *goja.Object
 	if jsOptions == nil || goja.IsNull(jsOptions) || goja.IsUndefined(jsOptions) {
 		jsOptionsObj = rt.NewObject()
