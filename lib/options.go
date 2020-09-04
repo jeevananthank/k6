@@ -26,6 +26,7 @@ import (
 	"fmt"
 	"net"
 	"reflect"
+	"strconv"
 
 	"github.com/pkg/errors"
 	"gopkg.in/guregu/null.v3"
@@ -69,8 +70,8 @@ func (v *TLSVersion) UnmarshalJSON(data []byte) error {
 
 // Fields for TLSVersions. Unmarshalling hack.
 type TLSVersionsFields struct {
-	Min TLSVersion `json:"min"` // Minimum allowed version, 0 = any.
-	Max TLSVersion `json:"max"` // Maximum allowed version, 0 = any.
+	Min TLSVersion `json:"min" ignored:"true"` // Minimum allowed version, 0 = any.
+	Max TLSVersion `json:"max" ignored:"true"` // Maximum allowed version, 0 = any.
 }
 
 // Describes a set (min/max) of TLS versions.
@@ -96,8 +97,21 @@ func (v *TLSVersions) isTLS13() bool {
 
 // A list of TLS cipher suites.
 // Marshals and unmarshals from a list of names, eg. "TLS_ECDHE_RSA_WITH_RC4_128_SHA".
-// BUG: This currently doesn't marshal back to JSON properly!!
 type TLSCipherSuites []uint16
+
+// MarshalJSON will return the JSON representation according to supported TLS cipher suites
+func (s *TLSCipherSuites) MarshalJSON() ([]byte, error) {
+	var suiteNames []string
+	for _, id := range *s {
+		if suiteName, ok := SupportedTLSCipherSuitesToString[id]; ok {
+			suiteNames = append(suiteNames, suiteName)
+		} else {
+			return nil, errors.Errorf("Unknown cipher suite id: %d", id)
+		}
+	}
+
+	return json.Marshal(suiteNames)
+}
 
 func (s *TLSCipherSuites) UnmarshalJSON(data []byte) error {
 	var suiteNames []string
@@ -157,10 +171,8 @@ func (c *TLSAuth) Certificate() (*tls.Certificate, error) {
 }
 
 // IPNet is a wrapper around net.IPNet for JSON unmarshalling
-type IPNet net.IPNet
-
-func (ipnet *IPNet) String() string {
-	return (*net.IPNet)(ipnet).String()
+type IPNet struct {
+	net.IPNet
 }
 
 // UnmarshalText populates the IPNet from the given CIDR
@@ -175,6 +187,84 @@ func (ipnet *IPNet) UnmarshalText(b []byte) error {
 	return nil
 }
 
+// HostAddress stores information about IP and port
+// for a host.
+type HostAddress net.TCPAddr
+
+// NewHostAddress creates a pointer to a new address with an IP object.
+func NewHostAddress(ip net.IP, portString string) (*HostAddress, error) {
+	var port int
+	if portString != "" {
+		var err error
+		if port, err = strconv.Atoi(portString); err != nil {
+			return nil, err
+		}
+	}
+
+	return &HostAddress{
+		IP:   ip,
+		Port: port,
+	}, nil
+}
+
+// String converts a HostAddress into a string.
+func (h *HostAddress) String() string {
+	return (*net.TCPAddr)(h).String()
+}
+
+// MarshalText implements the encoding.TextMarshaler interface.
+// The encoding is the same as returned by String, with one exception:
+// When len(ip) is zero, it returns an empty slice.
+func (h *HostAddress) MarshalText() ([]byte, error) {
+	if h == nil || len(h.IP) == 0 {
+		return []byte(""), nil
+	}
+
+	if len(h.IP) != net.IPv4len && len(h.IP) != net.IPv6len {
+		return nil, &net.AddrError{Err: "invalid IP address", Addr: h.IP.String()}
+	}
+
+	return []byte(h.String()), nil
+}
+
+// UnmarshalText implements the encoding.TextUnmarshaler interface.
+// The IP address is expected in a form accepted by ParseIP.
+func (h *HostAddress) UnmarshalText(text []byte) error {
+	if len(text) == 0 {
+		return &net.ParseError{Type: "IP address", Text: "<nil>"}
+	}
+
+	ip, port, err := splitHostPort(text)
+	if err != nil {
+		return err
+	}
+
+	nh, err := NewHostAddress(ip, port)
+	if err != nil {
+		return err
+	}
+
+	*h = *nh
+
+	return nil
+}
+
+func splitHostPort(text []byte) (net.IP, string, error) {
+	host, port, err := net.SplitHostPort(string(text))
+	if err != nil {
+		// This error means that there is no port.
+		// Make host the full text.
+		host = string(text)
+	}
+
+	ip := net.ParseIP(host)
+	if ip == nil {
+		return nil, "", &net.ParseError{Type: "IP address", Text: host}
+	}
+
+	return ip, port, nil
+}
+
 // ParseCIDR creates an IPNet out of a CIDR string
 func ParseCIDR(s string) (*IPNet, error) {
 	_, ipnet, err := net.ParseCIDR(s)
@@ -182,7 +272,7 @@ func ParseCIDR(s string) (*IPNet, error) {
 		return nil, err
 	}
 
-	parsedIPNet := IPNet(*ipnet)
+	parsedIPNet := IPNet{IPNet: *ipnet}
 
 	return &parsedIPNet, nil
 }
@@ -235,7 +325,7 @@ type Options struct {
 
 	// Specify TLS versions and cipher suites, and present client certificates.
 	TLSCipherSuites *TLSCipherSuites `json:"tlsCipherSuites" envconfig:"K6_TLS_CIPHER_SUITES"`
-	TLSVersion      *TLSVersions     `json:"tlsVersion" envconfig:"K6_TLS_VERSION"`
+	TLSVersion      *TLSVersions     `json:"tlsVersion" ignored:"true"`
 	TLSAuth         []*TLSAuth       `json:"tlsAuth" envconfig:"K6_TLSAUTH"`
 
 	// Throw warnings (eg. failed HTTP requests) as errors instead of simply logging them.
@@ -250,7 +340,7 @@ type Options struct {
 	BlacklistIPs []*IPNet `json:"blacklistIPs" envconfig:"K6_BLACKLIST_IPS"`
 
 	// Hosts overrides dns entries for given hosts
-	Hosts map[string]net.IP `json:"hosts" envconfig:"K6_HOSTS"`
+	Hosts map[string]*HostAddress `json:"hosts" envconfig:"K6_HOSTS"`
 
 	// Disable keep-alive connections
 	NoConnectionReuse null.Bool `json:"noConnectionReuse" envconfig:"K6_NO_CONNECTION_REUSE"`
